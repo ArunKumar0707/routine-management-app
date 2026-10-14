@@ -1,0 +1,251 @@
+/* DayFlow — activity start alerts (tone + notification + in-app banner).
+ * Loaded after app.js; reuses its globals (routine, isVisibleOn, range, duration, fmtDur, todayStr, esc, $).
+ * Settings live under their own localStorage key so app data/backups are unaffected. */
+(function () {
+  'use strict';
+  const KEY = 'dayflow.alerts.v1';
+  const FIRED_KEY = 'dayflow.alerts.fired';
+  const LEADS = [0, 5, 10, 15];
+
+  /* ---------- Settings ---------- */
+  const DEFAULTS = { enabled: false, sound: true, notify: true, tone: 'chime', lead: 0 };
+  function load() {
+    try {
+      const r = JSON.parse(localStorage.getItem(KEY));
+      if (!r || typeof r !== 'object') return { ...DEFAULTS };
+      return {
+        enabled: !!r.enabled, sound: r.sound !== false, notify: r.notify !== false,
+        tone: (['chime', 'beep', 'bell'].includes(r.tone) || (typeof r.tone === 'string' && /^custom:.{1,200}$/.test(r.tone))) ? r.tone : 'chime',
+        lead: LEADS.includes(Number(r.lead)) ? Number(r.lead) : 0
+      };
+    } catch (e) { return { ...DEFAULTS }; }
+  }
+  const cfg = load();
+  function saveCfg() { try { localStorage.setItem(KEY, JSON.stringify(cfg)); } catch (e) { /* ignore */ } }
+
+  /* ---------- Sound (Web Audio, no files needed) ---------- */
+  let actx = null;
+  function audio() {
+    if (!actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      try { actx = new AC(); } catch (e) { return null; }
+    }
+    if (actx.state === 'suspended') actx.resume().catch(() => {});
+    return actx;
+  }
+  const TONES = {
+    chime: [{ f: 523.25, t: 0, d: 0.55 }, { f: 659.25, t: 0.18, d: 0.55 }, { f: 783.99, t: 0.36, d: 0.9 }],
+    beep: [{ f: 880, t: 0, d: 0.16, type: 'square', g: 0.12 }, { f: 880, t: 0.26, d: 0.16, type: 'square', g: 0.12 }, { f: 880, t: 0.52, d: 0.16, type: 'square', g: 0.12 }],
+    bell: [{ f: 1318.5, t: 0, d: 1.6 }, { f: 2637, t: 0, d: 0.9, g: 0.08 }, { f: 1318.5, t: 0.7, d: 1.6, g: 0.18 }]
+  };
+  /* ---------- Custom sounds (files in the sounds/ folder) ---------- */
+  const SOUND_DIR = 'sounds/';
+  const AUDIO_EXT = /\.(mp3|wav|ogg|oga|m4a|aac|flac|opus|webm)$/i;
+  let customSounds = [];      // file names found in sounds/
+  let currentAudio = null;
+  const prettyName = f => f.replace(AUDIO_EXT, '').replace(/[_-]+/g, ' ').trim() || f;
+  function soundUrl(file) { return SOUND_DIR + encodeURIComponent(file); }
+  function playFile(file, fallbackTone) {
+    try {
+      if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+      const el = new Audio(soundUrl(file));
+      currentAudio = el;
+      const fallback = () => { if (currentAudio === el) { currentAudio = null; toast('Couldn’t play “' + file + '”. Using the default chime instead.'); playTone(fallbackTone || 'chime'); } };
+      el.addEventListener('error', fallback, { once: true });
+      const p = el.play();
+      if (p && p.catch) p.catch(err => { if (err && err.name === 'NotAllowedError') toast('Click anywhere on the page once so the browser allows sound.'); else fallback(); });
+    } catch (e) { playTone(fallbackTone || 'chime'); }
+  }
+  async function discoverSounds() {
+    const found = new Set();
+    // 1) manifest: sounds/sounds.js sets window.DAYFLOW_SOUNDS = ['my-tone.mp3', ...]
+    if (Array.isArray(window.DAYFLOW_SOUNDS)) window.DAYFLOW_SOUNDS.forEach(f => { if (typeof f === 'string' && AUDIO_EXT.test(f)) found.add(f); });
+    // 2) automatic: when served over http(s), read the folder listing
+    if (location.protocol.startsWith('http')) {
+      try {
+        const res = await fetch(SOUND_DIR, { cache: 'no-store' });
+        if (res.ok) {
+          const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+          doc.querySelectorAll('a[href]').forEach(a => {
+            let name = decodeURIComponent((a.getAttribute('href') || '').split('?')[0].split('/').pop());
+            if (AUDIO_EXT.test(name)) found.add(name);
+          });
+        }
+      } catch (e) { /* listing not available — manifest still works */ }
+    }
+    customSounds = [...found].sort((a, b) => a.localeCompare(b));
+  }
+  function populateTones() {
+    const sel = $('#alertTone');
+    const builtIn = [['chime', 'Chime'], ['beep', 'Beep'], ['bell', 'Bell']];
+    let html = '<optgroup label="Built-in">' + builtIn.map(([v, l]) => `<option value="${v}">${l}</option>`).join('') + '</optgroup>';
+    if (customSounds.length) html += '<optgroup label="Your sounds">' + customSounds.map(f => `<option value="custom:${esc(f)}">${esc(prettyName(f))}</option>`).join('') + '</optgroup>';
+    // keep a saved choice visible even if its file is currently missing
+    if (cfg.tone.startsWith('custom:') && !customSounds.includes(cfg.tone.slice(7))) html += `<option value="${esc(cfg.tone)}">${esc(prettyName(cfg.tone.slice(7)))} (file not found)</option>`;
+    sel.innerHTML = html;
+    sel.value = cfg.tone;
+    $('#soundHelp').textContent = customSounds.length
+      ? `${customSounds.length} custom ${customSounds.length === 1 ? 'sound' : 'sounds'} found in the sounds folder.`
+      : 'Put .mp3 / .wav / .ogg files in the “sounds” folder (next to index.html), then press Refresh.';
+  }
+
+  function playTone(name) {
+    if (typeof name === 'string' && name.startsWith('custom:')) { playFile(name.slice(7)); return; }
+    const ctx = audio();
+    if (!ctx) return;
+    const now = ctx.currentTime + 0.02;
+    (TONES[name] || TONES.chime).forEach(n => {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = n.type || 'sine'; osc.frequency.value = n.f;
+      const peak = n.g || 0.25;
+      gain.gain.setValueAtTime(0.0001, now + n.t);
+      gain.gain.exponentialRampToValueAtTime(peak, now + n.t + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + n.t + n.d);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + n.t); osc.stop(now + n.t + n.d + 0.05);
+    });
+  }
+
+  /* ---------- Notification + banner ---------- */
+  const notifSupported = () => 'Notification' in window;
+  function showBanner(title, body) {
+    const stack = $('#alertStack');
+    const el = document.createElement('div');
+    el.className = 'alert-item';
+    el.innerHTML = `<div class="alert-icon" aria-hidden="true">🔔</div><div class="alert-text"><strong>${esc(title)}</strong><div class="small">${esc(body)}</div></div><button class="btn" type="button">Dismiss</button>`;
+    el.querySelector('button').addEventListener('click', () => el.remove());
+    stack.appendChild(el);
+    setTimeout(() => el.remove(), 45000);
+  }
+  function fire(title, body, id) {
+    showBanner(title, body);
+    if (cfg.sound) playTone(cfg.tone);
+    if (cfg.notify && notifSupported() && Notification.permission === 'granted') {
+      try {
+        const n = new Notification(title, { body, tag: 'dayflow-' + id, silent: cfg.sound });
+        n.onclick = () => { window.focus(); n.close(); };
+      } catch (e) { /* some browsers only allow notifications from a service worker */ }
+    }
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  }
+  function fireActivity(a, lead) {
+    const title = lead ? `Starting in ${lead} min: ${a.name}` : `Started: ${a.name}`;
+    const body = `${range(a)} · ${fmtDur(duration(a))}${a.notes ? ' — ' + a.notes : ''}`;
+    fire(a.icon ? `${a.icon} ${title}` : title, body, a.id);
+  }
+
+  /* ---------- Scheduler ---------- */
+  let fired = new Set();
+  try { fired = new Set(JSON.parse(sessionStorage.getItem(FIRED_KEY) || '[]')); } catch (e) { /* ignore */ }
+  function rememberFired() { try { sessionStorage.setItem(FIRED_KEY, JSON.stringify([...fired].slice(-200))); } catch (e) { /* ignore */ } }
+  function dateOffset(days) {
+    const d = new Date(); d.setDate(d.getDate() + days);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  function nowMin() { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); }
+
+  /* Each activity alerts once per day at (start − lead). A late tick (throttled background tab) still fires within 1 minute. */
+  function tick() {
+    refreshNext();
+    if (!cfg.enabled) return;
+    const today = todayStr(), tomorrow = dateOffset(1), nm = nowMin();
+    for (const a of routine().activities) {
+      const raw = a.start - cfg.lead;
+      const t = (raw + 1440) % 1440;
+      if ((nm - t + 1440) % 1440 > 1) continue;
+      if (!isVisibleOn(a, raw < 0 ? tomorrow : today)) continue;
+      const key = `${today}|${a.id}|${a.start}|${cfg.lead}`;
+      if (fired.has(key)) continue;
+      fired.add(key); rememberFired();
+      fireActivity(a, cfg.lead);
+    }
+  }
+
+  function nextAlert() {
+    const nm = nowMin();
+    let best = null;
+    for (const a of routine().activities) {
+      for (const day of [0, 1, 2]) {
+        const delta = day * 1440 + a.start - cfg.lead - nm; // minutes until the alert for the activity on day offset `day`
+        if (delta <= 0 || !isVisibleOn(a, dateOffset(day))) continue;
+        if (!best || delta < best.delta) best = { a, delta };
+        break;
+      }
+    }
+    return best;
+  }
+  function refreshNext() {
+    const el = $('#alertNext');
+    if (!cfg.enabled) { el.textContent = ''; return; }
+    const n = nextAlert();
+    el.textContent = n
+      ? `Next: ${n.a.name} ${cfg.lead ? 'reminder' : 'starts'} in ${fmtDur(n.delta)}`
+      : 'No upcoming activities to alert for.';
+  }
+
+  /* ---------- UI ---------- */
+  function statusText() {
+    const bits = [];
+    if (cfg.notify) {
+      if (!notifSupported()) bits.push('This browser can’t show system notifications; you’ll still get the in-app alert and tone.');
+      else if (Notification.permission === 'denied') bits.push('Notifications are blocked in your browser settings; the in-app alert and tone still work.');
+      else if (Notification.permission === 'default') bits.push('Notification permission hasn’t been granted yet.');
+    }
+    bits.push('Alerts follow the selected routine and only work while this tab is open (it can be in the background).');
+    return bits.join(' ');
+  }
+  function syncUI() {
+    $('#alertEnabled').checked = cfg.enabled;
+    $('#alertSound').checked = cfg.sound;
+    $('#alertNotify').checked = cfg.notify;
+    if ($('#alertTone').value !== cfg.tone) populateTones();
+    $('#alertLead').value = String(cfg.lead);
+    $('#alertTone').disabled = !cfg.sound;
+    $('#alertStatus').textContent = statusText();
+    refreshNext();
+  }
+  function askPermission() {
+    if (cfg.notify && notifSupported() && Notification.permission === 'default') {
+      try {
+        const p = Notification.requestPermission(() => {});
+        if (p && p.then) p.then(syncUI); else syncUI();
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  async function refreshSounds(announce) {
+    await discoverSounds();
+    populateTones();
+    if (announce) toast(customSounds.length ? `Found ${customSounds.length} custom sound(s)` : 'No custom sounds found in the sounds folder');
+  }
+  function init() {
+    populateTones();
+    syncUI();
+    refreshSounds(false);
+    $('#soundRefresh').addEventListener('click', () => refreshSounds(true));
+    $('#alertEnabled').addEventListener('change', e => {
+      cfg.enabled = e.target.checked; saveCfg();
+      if (cfg.enabled) { audio(); askPermission(); }
+      syncUI();
+    });
+    $('#alertSound').addEventListener('change', e => { cfg.sound = e.target.checked; saveCfg(); if (cfg.sound) audio(); syncUI(); });
+    $('#alertNotify').addEventListener('change', e => { cfg.notify = e.target.checked; saveCfg(); askPermission(); syncUI(); });
+    $('#alertTone').addEventListener('change', e => { cfg.tone = e.target.value; saveCfg(); playTone(cfg.tone); });
+    $('#alertLead').addEventListener('change', e => { cfg.lead = Number(e.target.value); saveCfg(); syncUI(); });
+    $('#alertTest').addEventListener('click', () => {
+      audio(); askPermission();
+      fire('DayFlow test alert', 'This is how activity alerts will look and sound.', 'test');
+    });
+    // Browsers only allow sound after a user gesture; unlock audio on the first interaction.
+    document.addEventListener('pointerdown', () => { if (cfg.enabled && cfg.sound) audio(); }, { once: true });
+    // Keep "Next:" current when the routine or its activities change.
+    document.addEventListener('click', () => setTimeout(refreshNext, 0));
+    document.addEventListener('change', () => setTimeout(refreshNext, 0));
+    setInterval(tick, 10000);
+    tick();
+  }
+
+  window.DayFlowAlerts = { tick, fireActivity, getConfig: () => ({ ...cfg }), setConfig: c => { Object.assign(cfg, c); saveCfg(); syncUI(); } };
+  init();
+})();

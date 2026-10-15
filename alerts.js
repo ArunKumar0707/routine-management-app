@@ -238,6 +238,13 @@
     if (!sub && createIfMissing) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64(PUSH.vapidPublicKey) });
     return sub;
   }
+  /* A failed fetch() looks the same whether the server is unreachable or the browser blocked it (CORS). Tell them apart. */
+  async function diagnose() {
+    const base = PUSH.server.replace(/\/+$/, '');
+    try { await fetch(base + '/', { mode: 'no-cors', cache: 'no-store' }); }
+    catch (e) { return 'Can’t reach the push server at ' + base + '. Check “server” in push-config.js (must start with https://) and that the worker is deployed — its address should open in a browser and say “DayFlow push worker is running.”'; }
+    return 'The push server is reachable but refused this site (CORS). In the worker, set ALLOWED_ORIGIN to exactly ' + location.origin + ' and deploy again.';
+  }
   async function syncPush(force) {
     if (!cfg.push || !pushSupported() || Notification.permission !== 'granted') { pushActive = false; return false; }
     const snap = snapshot(), sig = JSON.stringify(snap);
@@ -249,7 +256,8 @@
       if (!r.ok) throw new Error((r.data && r.data.error) || ('server returned ' + r.status));
       lastSig = sig; pushActive = true; pushNote = `Synced ${r.data.activities} activities to the push server.`;
     } catch (e) {
-      pushActive = false; pushNote = 'Couldn’t reach the push server (' + (e.message || 'error') + '). Using in-page alerts only.';
+      pushActive = false;
+      pushNote = (e instanceof TypeError ? await diagnose() : 'The push server said: ' + (e.message || 'error')) + ' (Using in-page alerts only.)';
     }
     syncUI(); return pushActive;
   }
@@ -277,7 +285,7 @@
       await syncPush(true);
       const r = await post('/test', { endpoint: sub.endpoint });
       toast(r.ok ? 'Test push sent — it should appear in a few seconds.' : 'Test failed: ' + ((r.data && r.data.error) || r.status));
-    } catch (e) { toast('Couldn’t reach the push server.'); }
+    } catch (e) { toast(e instanceof TypeError ? await diagnose() : 'Test failed: ' + (e.message || 'error')); }
   }
 
   /* ---------- Keep screen awake (phones suspend pages when the screen turns off) ---------- */

@@ -1,4 +1,4 @@
-  /* DayFlow push worker (Cloudflare Workers, free tier)
+/* DayFlow push worker (Cloudflare Workers, free tier)
  *
  * What it does
  *   - The DayFlow page sends this worker your Web Push subscription plus the current routine (POST /sync).
@@ -191,7 +191,12 @@ async function loadSubs(env) {
 const saveSubs = (env, subs) => env.DAYFLOW.put('subs', JSON.stringify(subs));
 
 /* ---------- HTTP ---------- */
-function allowedOrigins(env) { return String(env.ALLOWED_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean); }
+/* Accepts "https://you.github.io", "https://you.github.io/", or even "https://you.github.io/dayflow/" — only the origin matters. */
+function allowedOrigins(env) {
+  return String(env.ALLOWED_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean).map(s => {
+    try { const o = new URL(s).origin; return o === 'null' ? s : o; } catch (e) { return s; }
+  });
+}
 function corsHeaders(req, env) {
   const list = allowedOrigins(env), origin = req.headers.get('Origin');
   const h = { 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Max-Age': '86400', Vary: 'Origin' };

@@ -1,8 +1,8 @@
 /* DayFlow service worker
  * - lets the page show system notifications on Android (required there)
  * - keeps the app usable offline (network first, cached copy as a fallback) */
-const CACHE = 'dayflow-v1';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'alerts.js', 'quotes.js', 'sounds/sounds.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'dayflow-v2';
+const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'alerts.js', 'quotes.js', 'push-config.js', 'sounds/sounds.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => Promise.all(SHELL.map(u => c.add(u).catch(() => {})))).then(() => self.skipWaiting()));
@@ -27,4 +27,20 @@ self.addEventListener('notificationclick', e => {
     for (const c of list) if ('focus' in c) return c.focus();
     return self.clients.openWindow(url);
   }));
+});
+
+/* Background alerts: the push worker sends an encrypted message at each activity's start time. */
+self.addEventListener('push', e => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; } catch (err) { data = { body: e.data ? e.data.text() : '' }; }
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    // If DayFlow is on screen, the page shows its own banner and plays the tone — don't double up (except for the test button).
+    if (!data.test && wins.some(w => w.visibilityState === 'visible')) return;
+    await self.registration.showNotification(data.title || 'DayFlow', {
+      body: data.body || '', tag: data.tag || 'dayflow', renotify: true,
+      icon: 'icon-192.png', badge: 'icon-192.png', vibrate: [200, 100, 200],
+      data: { url: './index.html' }
+    });
+  })());
 });

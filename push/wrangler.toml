@@ -1,0 +1,17 @@
+# Only needed if you deploy with the wrangler CLI (the dashboard route in SETUP.md needs no file).
+name = "dayflow-push"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[kv_namespaces]]
+binding = "DAYFLOW"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"   # wrangler kv namespace create DAYFLOW
+
+[vars]
+ALLOWED_ORIGIN = "https://YOUR-USERNAME.github.io"
+VAPID_PUBLIC = "PASTE_PUBLIC_KEY_HERE"
+VAPID_SUBJECT = "mailto:you@example.com"
+# secret (not stored in this file):  wrangler secret put VAPID_PRIVATE_JWK

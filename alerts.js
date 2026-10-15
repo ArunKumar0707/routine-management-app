@@ -8,13 +8,13 @@
   const LEADS = [0, 5, 10, 15];
 
   /* ---------- Settings ---------- */
-  const DEFAULTS = { enabled: false, sound: true, notify: true, tone: 'chime', lead: 0, keepAwake: false };
+  const DEFAULTS = { enabled: false, sound: true, notify: true, tone: 'chime', lead: 0, keepAwake: false, push: false };
   function load() {
     try {
       const r = JSON.parse(localStorage.getItem(KEY));
       if (!r || typeof r !== 'object') return { ...DEFAULTS };
       return {
-        enabled: !!r.enabled, sound: r.sound !== false, notify: r.notify !== false, keepAwake: !!r.keepAwake,
+        enabled: !!r.enabled, sound: r.sound !== false, notify: r.notify !== false, keepAwake: !!r.keepAwake, push: !!r.push,
         tone: (['chime', 'beep', 'bell'].includes(r.tone) || (typeof r.tone === 'string' && /^custom:.{1,200}$/.test(r.tone))) ? r.tone : 'chime',
         lead: LEADS.includes(Number(r.lead)) ? Number(r.lead) : 0
       };
@@ -149,8 +149,9 @@
   }
   function fire(title, body, id) {
     showBanner(title, body);
-    if (cfg.sound) playTone(cfg.tone);
-    if (cfg.notify && notifSupported() && Notification.permission === 'granted') systemNotify(title, body, id);
+    // With background push on, the push notification covers the "page hidden" case, so the page skips its own then.
+    if (cfg.sound && !(pushActive && document.hidden)) playTone(cfg.tone);
+    if (cfg.notify && notifSupported() && Notification.permission === 'granted' && !pushActive) systemNotify(title, body, id);
     if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200]); } catch (e) { /* ignore */ } }
   }
   function fireActivity(a, lead, lateBy = 0) {
@@ -212,6 +213,73 @@
       : 'No upcoming activities to alert for.';
   }
 
+  /* ---------- Background push (needs the push worker — see push/SETUP.md) ---------- */
+  const PUSH = window.DAYFLOW_PUSH || {};
+  const pushConfigured = () => !!(PUSH.server && PUSH.vapidPublicKey);
+  const pushSupported = () => pushConfigured() && 'serviceWorker' in navigator && 'PushManager' in window && window.isSecureContext;
+  let pushActive = false;        // true only when this device is subscribed AND the worker has our schedule
+  let pushNote = '';             // short status for the UI
+  let lastSig = '', syncTimer = null;
+  const urlB64 = s => { const p = '='.repeat((4 - (s.length % 4)) % 4); const b = atob((s + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+  const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { return 'UTC'; } };
+  async function post(path, body) {
+    const res = await fetch(PUSH.server.replace(/\/+$/, '') + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    let data = null; try { data = await res.json(); } catch (e) { /* ignore */ }
+    return { ok: res.ok, status: res.status, data };
+  }
+  const snapshot = () => ({ enabled: cfg.enabled, lead: cfg.lead, tz: tz(), activities: routine().activities.map(a => ({ id: a.id, name: a.name, start: a.start, end: a.end, icon: a.icon || '', notes: a.notes || '', repeat: a.repeat, date: a.date })) });
+  async function getRegistration() {
+    return swReg || await Promise.race([navigator.serviceWorker.ready, new Promise(r => setTimeout(() => r(null), 4000))]);
+  }
+  async function ensureSubscription(createIfMissing) {
+    const reg = await getRegistration();
+    if (!reg || !reg.pushManager) return null;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub && createIfMissing) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64(PUSH.vapidPublicKey) });
+    return sub;
+  }
+  async function syncPush(force) {
+    if (!cfg.push || !pushSupported() || Notification.permission !== 'granted') { pushActive = false; return false; }
+    const snap = snapshot(), sig = JSON.stringify(snap);
+    if (!force && sig === lastSig && pushActive) return true;
+    try {
+      const sub = await ensureSubscription(true);
+      if (!sub) throw new Error('no subscription');
+      const r = await post('/sync', { subscription: sub.toJSON(), ...snap });
+      if (!r.ok) throw new Error((r.data && r.data.error) || ('server returned ' + r.status));
+      lastSig = sig; pushActive = true; pushNote = `Synced ${r.data.activities} activities to the push server.`;
+    } catch (e) {
+      pushActive = false; pushNote = 'Couldn’t reach the push server (' + (e.message || 'error') + '). Using in-page alerts only.';
+    }
+    syncUI(); return pushActive;
+  }
+  function scheduleSyncIfChanged() { if (JSON.stringify(snapshot()) !== lastSig) scheduleSync(); }
+  function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(() => syncPush(false), 1500); }
+  async function enablePush() {
+    if (!pushSupported()) { cfg.push = false; saveCfg(); pushNote = 'Background alerts need HTTPS, a supported browser, and push-config.js filled in.'; return syncUI(); }
+    let perm = Notification.permission;
+    if (perm === 'default') perm = await Notification.requestPermission();
+    if (perm !== 'granted') { cfg.push = false; saveCfg(); pushNote = 'Notification permission is required for background alerts.'; return syncUI(); }
+    cfg.push = true; if (!cfg.enabled) { cfg.enabled = true; } saveCfg();
+    await syncPush(true);
+    if (!pushActive) { cfg.push = false; saveCfg(); }
+    syncUI();
+  }
+  async function disablePush() {
+    cfg.push = false; pushActive = false; saveCfg(); pushNote = '';
+    try { const sub = await ensureSubscription(false); if (sub) { const ep = sub.endpoint; await sub.unsubscribe(); post('/unsubscribe', { endpoint: ep }).catch(() => {}); } } catch (e) { /* ignore */ }
+    syncUI();
+  }
+  async function testPush() {
+    try {
+      const sub = await ensureSubscription(false);
+      if (!sub) { toast('Turn on background alerts first.'); return; }
+      await syncPush(true);
+      const r = await post('/test', { endpoint: sub.endpoint });
+      toast(r.ok ? 'Test push sent — it should appear in a few seconds.' : 'Test failed: ' + ((r.data && r.data.error) || r.status));
+    } catch (e) { toast('Couldn’t reach the push server.'); }
+  }
+
   /* ---------- Keep screen awake (phones suspend pages when the screen turns off) ---------- */
   let wakeLock = null;
   const wakeSupported = () => 'wakeLock' in navigator;
@@ -242,6 +310,14 @@
     $('#alertSound').checked = cfg.sound;
     $('#alertNotify').checked = cfg.notify;
     $('#alertAwake').checked = cfg.keepAwake;
+    const pc = pushConfigured();
+    $('#alertPush').checked = cfg.push && pushActive;
+    $('#alertPush').disabled = !pc || !pushSupported();
+    $('#pushTest').classList.toggle('hidden', !(cfg.push && pushActive));
+    $('#pushHint').textContent = !pc ? 'Not set up yet — deploy the push worker and fill in push-config.js (see push/SETUP.md).'
+      : !pushSupported() ? 'Needs the HTTPS site in a browser with push support.'
+      : cfg.push && pushActive ? 'On: you’ll be notified at each start time even with DayFlow closed.' + (pushNote ? ' ' + pushNote : '')
+      : pushNote;
     $('#alertAwakeRow').classList.toggle('hidden', !wakeSupported());
     if ($('#alertTone').value !== cfg.tone) populateTones();
     $('#alertLead').value = String(cfg.lead);
@@ -271,13 +347,15 @@
     $('#alertEnabled').addEventListener('change', e => {
       cfg.enabled = e.target.checked; saveCfg();
       if (cfg.enabled) { audio(); askPermission(); }
-      syncUI(); updateWakeLock();
+      syncUI(); updateWakeLock(); if (cfg.push) scheduleSync();
     });
+    $('#alertPush').addEventListener('change', e => { if (e.target.checked) enablePush(); else disablePush(); });
+    $('#pushTest').addEventListener('click', testPush);
     $('#alertAwake').addEventListener('change', e => { cfg.keepAwake = e.target.checked; saveCfg(); updateWakeLock(); });
     $('#alertSound').addEventListener('change', e => { cfg.sound = e.target.checked; saveCfg(); if (cfg.sound) audio(); syncUI(); });
     $('#alertNotify').addEventListener('change', e => { cfg.notify = e.target.checked; saveCfg(); askPermission(); syncUI(); });
     $('#alertTone').addEventListener('change', e => { cfg.tone = e.target.value; saveCfg(); playTone(cfg.tone); });
-    $('#alertLead').addEventListener('change', e => { cfg.lead = Number(e.target.value); saveCfg(); syncUI(); });
+    $('#alertLead').addEventListener('change', e => { cfg.lead = Number(e.target.value); saveCfg(); syncUI(); if (cfg.push) scheduleSync(); });
     $('#alertTest').addEventListener('click', () => {
       audio(); askPermission();
       fire('DayFlow test alert', 'This is how activity alerts will look and sound.', 'test');
@@ -291,7 +369,8 @@
     // When the phone wakes / the tab returns to the foreground: catch up on anything missed, re-acquire the wake lock.
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { tick(CATCH_UP_MIN); updateWakeLock(); } });
     window.addEventListener('pageshow', () => tick(CATCH_UP_MIN));
-    setInterval(() => tick(), 10000);
+    setInterval(() => { tick(); if (cfg.push) scheduleSyncIfChanged(); }, 10000);
+    if (cfg.push) setTimeout(() => syncPush(true), 1200);   // re-register after page load (also heals an expired subscription)
     tick(CATCH_UP_MIN);
     updateWakeLock();
   }

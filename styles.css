@@ -272,3 +272,5 @@ textarea.input { resize: vertical; width: 100%; }
 }
 
 .vt-hour-label { white-space: nowrap; }
+
+.push-hint { margin: -4px 0 12px 28px; }

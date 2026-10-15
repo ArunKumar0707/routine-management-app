@@ -97,6 +97,8 @@
       <label class="switch-row"><input type="checkbox" id="alertEnabled"> Alert when an activity starts</label>
       <label class="switch-row"><input type="checkbox" id="alertSound"> Play a tone</label>
       <label class="switch-row"><input type="checkbox" id="alertNotify"> Show a notification</label>
+      <label class="switch-row" id="alertPushRow"><input type="checkbox" id="alertPush"> Background alerts — even when DayFlow is closed</label>
+      <p class="muted small push-hint" id="pushHint"></p>
       <label class="switch-row" id="alertAwakeRow"><input type="checkbox" id="alertAwake"> Keep screen on while open (recommended on phones)</label>
       <div class="alert-grid">
         <label class="field">Tone
@@ -116,7 +118,7 @@
         </label>
       </div>
       <p class="muted small" id="soundHelp"></p>
-      <div class="btn-grid"><button class="btn" id="alertTest" type="button">Test alert</button><button class="btn" id="soundRefresh" type="button">Refresh sounds</button></div>
+      <div class="btn-grid"><button class="btn" id="alertTest" type="button">Test alert</button><button class="btn" id="soundRefresh" type="button">Refresh sounds</button><button class="btn hidden" id="pushTest" type="button">Send test push</button></div>
       <p class="small" id="alertNext"></p>
       <p class="muted small" id="alertStatus"></p>
     </section>
@@ -256,6 +258,7 @@
 
 <script src="app.js"></script>
 <script src="sounds/sounds.js"></script>
+<script src="push-config.js"></script>
 <script src="quotes.js"></script>
 <script src="alerts.js"></script>
 </body>

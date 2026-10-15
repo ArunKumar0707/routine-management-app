@@ -8,13 +8,13 @@
   const LEADS = [0, 5, 10, 15];
 
   /* ---------- Settings ---------- */
-  const DEFAULTS = { enabled: false, sound: true, notify: true, tone: 'chime', lead: 0 };
+  const DEFAULTS = { enabled: false, sound: true, notify: true, tone: 'chime', lead: 0, keepAwake: false };
   function load() {
     try {
       const r = JSON.parse(localStorage.getItem(KEY));
       if (!r || typeof r !== 'object') return { ...DEFAULTS };
       return {
-        enabled: !!r.enabled, sound: r.sound !== false, notify: r.notify !== false,
+        enabled: !!r.enabled, sound: r.sound !== false, notify: r.notify !== false, keepAwake: !!r.keepAwake,
         tone: (['chime', 'beep', 'bell'].includes(r.tone) || (typeof r.tone === 'string' && /^custom:.{1,200}$/.test(r.tone))) ? r.tone : 'chime',
         lead: LEADS.includes(Number(r.lead)) ? Number(r.lead) : 0
       };
@@ -118,27 +118,53 @@
     stack.appendChild(el);
     setTimeout(() => el.remove(), 45000);
   }
+  /* Android Chrome does not allow `new Notification()`; it requires a service worker's showNotification().
+   * Needs HTTPS (GitHub Pages is fine) or localhost. */
+  let swReg = null;
+  function registerSW() {
+    if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+    navigator.serviceWorker.register('sw.js').then(reg => { swReg = reg; syncUI(); }).catch(() => { /* ignore */ });
+  }
+  async function systemNotify(title, body, id) {
+    // When the page is visible it plays the tone itself, so the system notification stays silent.
+    // When the page is hidden, let the system notification make its own sound/vibration.
+    // (Browsers reject `silent: true` combined with `vibrate`, so only one of them is ever set.)
+    const quiet = cfg.sound && !document.hidden;
+    const full = { body, tag: 'dayflow-' + id, renotify: true, icon: 'icon-192.png', badge: 'icon-192.png', data: { url: location.href } };
+    if (quiet) full.silent = true; else full.vibrate = [200, 100, 200];
+    const plain = { body, tag: 'dayflow-' + id };
+    let reg = swReg;
+    if (!reg && 'serviceWorker' in navigator && window.isSecureContext) {
+      try { reg = await Promise.race([navigator.serviceWorker.ready, new Promise(r => setTimeout(r, 1500))]); } catch (e) { reg = null; }
+    }
+    for (const opts of [full, plain]) {
+      try {
+        if (reg && reg.showNotification) { await reg.showNotification(title, opts); return true; }
+        const n = new Notification(title, opts);   // desktop browsers without a service worker (e.g. file://)
+        n.onclick = () => { window.focus(); n.close(); };
+        return true;
+      } catch (e) { /* try the simpler options next */ }
+    }
+    return false;
+  }
   function fire(title, body, id) {
     showBanner(title, body);
     if (cfg.sound) playTone(cfg.tone);
-    if (cfg.notify && notifSupported() && Notification.permission === 'granted') {
-      try {
-        const n = new Notification(title, { body, tag: 'dayflow-' + id, silent: cfg.sound });
-        n.onclick = () => { window.focus(); n.close(); };
-      } catch (e) { /* some browsers only allow notifications from a service worker */ }
-    }
-    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    if (cfg.notify && notifSupported() && Notification.permission === 'granted') systemNotify(title, body, id);
+    if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200]); } catch (e) { /* ignore */ } }
   }
-  function fireActivity(a, lead) {
-    const title = lead ? `Starting in ${lead} min: ${a.name}` : `Started: ${a.name}`;
+  function fireActivity(a, lead, lateBy = 0) {
+    const mins = lead - lateBy; // minutes until the activity actually starts
+    const title = mins > 1 ? `Starting in ${mins} min: ${a.name}` : mins === 1 ? `Starting in 1 min: ${a.name}`
+      : mins === 0 || (mins === -1 && lead === 0) ? `Started: ${a.name}` : `Started ${-mins} min ago: ${a.name}`;
     const body = `${range(a)} · ${fmtDur(duration(a))}${a.notes ? ' — ' + a.notes : ''}`;
     fire(a.icon ? `${a.icon} ${title}` : title, body, a.id);
   }
 
   /* ---------- Scheduler ---------- */
   let fired = new Set();
-  try { fired = new Set(JSON.parse(sessionStorage.getItem(FIRED_KEY) || '[]')); } catch (e) { /* ignore */ }
-  function rememberFired() { try { sessionStorage.setItem(FIRED_KEY, JSON.stringify([...fired].slice(-200))); } catch (e) { /* ignore */ } }
+  try { fired = new Set(JSON.parse(localStorage.getItem(FIRED_KEY) || '[]').filter(k => String(k).startsWith(todayStr() + '|'))); } catch (e) { /* ignore */ }
+  function rememberFired() { try { localStorage.setItem(FIRED_KEY, JSON.stringify([...fired].slice(-200))); } catch (e) { /* ignore */ } }
   function dateOffset(days) {
     const d = new Date(); d.setDate(d.getDate() + days);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -146,19 +172,21 @@
   function nowMin() { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); }
 
   /* Each activity alerts once per day at (start − lead). A late tick (throttled background tab) still fires within 1 minute. */
-  function tick() {
+  const CATCH_UP_MIN = 10; // after the phone sleeps / the tab was frozen, still report activities that started up to 10 min ago
+  function tick(window_ = 1) {
     refreshNext();
     if (!cfg.enabled) return;
     const today = todayStr(), tomorrow = dateOffset(1), nm = nowMin();
     for (const a of routine().activities) {
       const raw = a.start - cfg.lead;
       const t = (raw + 1440) % 1440;
-      if ((nm - t + 1440) % 1440 > 1) continue;
+      const lateBy = (nm - t + 1440) % 1440;
+      if (lateBy > window_) continue;
       if (!isVisibleOn(a, raw < 0 ? tomorrow : today)) continue;
       const key = `${today}|${a.id}|${a.start}|${cfg.lead}`;
       if (fired.has(key)) continue;
       fired.add(key); rememberFired();
-      fireActivity(a, cfg.lead);
+      fireActivity(a, cfg.lead, lateBy);
     }
   }
 
@@ -184,6 +212,19 @@
       : 'No upcoming activities to alert for.';
   }
 
+  /* ---------- Keep screen awake (phones suspend pages when the screen turns off) ---------- */
+  let wakeLock = null;
+  const wakeSupported = () => 'wakeLock' in navigator;
+  async function updateWakeLock() {
+    const want = cfg.enabled && cfg.keepAwake && wakeSupported() && document.visibilityState === 'visible';
+    try {
+      if (want && !wakeLock) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      } else if (!want && wakeLock) { await wakeLock.release(); wakeLock = null; }
+    } catch (e) { wakeLock = null; }
+  }
+
   /* ---------- UI ---------- */
   function statusText() {
     const bits = [];
@@ -192,13 +233,16 @@
       else if (Notification.permission === 'denied') bits.push('Notifications are blocked in your browser settings; the in-app alert and tone still work.');
       else if (Notification.permission === 'default') bits.push('Notification permission hasn’t been granted yet.');
     }
-    bits.push('Alerts follow the selected routine and only work while this tab is open (it can be in the background).');
+    if (cfg.notify && notifSupported() && Notification.permission === 'granted' && !swReg && /Android/i.test(navigator.userAgent)) bits.push('Phone notifications need the HTTPS version of the site (e.g. GitHub Pages).');
+    bits.push('Alerts follow the selected routine and need DayFlow to stay open. On a phone, install it to your home screen and enable “Keep screen on”.');
     return bits.join(' ');
   }
   function syncUI() {
     $('#alertEnabled').checked = cfg.enabled;
     $('#alertSound').checked = cfg.sound;
     $('#alertNotify').checked = cfg.notify;
+    $('#alertAwake').checked = cfg.keepAwake;
+    $('#alertAwakeRow').classList.toggle('hidden', !wakeSupported());
     if ($('#alertTone').value !== cfg.tone) populateTones();
     $('#alertLead').value = String(cfg.lead);
     $('#alertTone').disabled = !cfg.sound;
@@ -227,8 +271,9 @@
     $('#alertEnabled').addEventListener('change', e => {
       cfg.enabled = e.target.checked; saveCfg();
       if (cfg.enabled) { audio(); askPermission(); }
-      syncUI();
+      syncUI(); updateWakeLock();
     });
+    $('#alertAwake').addEventListener('change', e => { cfg.keepAwake = e.target.checked; saveCfg(); updateWakeLock(); });
     $('#alertSound').addEventListener('change', e => { cfg.sound = e.target.checked; saveCfg(); if (cfg.sound) audio(); syncUI(); });
     $('#alertNotify').addEventListener('change', e => { cfg.notify = e.target.checked; saveCfg(); askPermission(); syncUI(); });
     $('#alertTone').addEventListener('change', e => { cfg.tone = e.target.value; saveCfg(); playTone(cfg.tone); });
@@ -242,8 +287,13 @@
     // Keep "Next:" current when the routine or its activities change.
     document.addEventListener('click', () => setTimeout(refreshNext, 0));
     document.addEventListener('change', () => setTimeout(refreshNext, 0));
-    setInterval(tick, 10000);
-    tick();
+    registerSW();
+    // When the phone wakes / the tab returns to the foreground: catch up on anything missed, re-acquire the wake lock.
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { tick(CATCH_UP_MIN); updateWakeLock(); } });
+    window.addEventListener('pageshow', () => tick(CATCH_UP_MIN));
+    setInterval(() => tick(), 10000);
+    tick(CATCH_UP_MIN);
+    updateWakeLock();
   }
 
   window.DayFlowAlerts = { tick, fireActivity, getConfig: () => ({ ...cfg }), setConfig: c => { Object.assign(cfg, c); saveCfg(); syncUI(); } };

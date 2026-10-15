@@ -252,3 +252,23 @@ textarea.input { resize: vertical; width: 100%; }
 .alert-item .btn { padding: 5px 10px; font-size: .8rem; }
 .alert-icon { font-size: 1.4rem; }
 @keyframes alertIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+
+/* Quote card */
+.quote-wrap { max-width: 1280px; margin: 16px auto 0; padding: 0 24px; }
+.quote-card { display: flex; align-items: center; gap: 16px; background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 18px; }
+.quote-mark { font-size: 3rem; line-height: .8; color: var(--accent); font-family: Georgia, "Times New Roman", serif; align-self: flex-start; margin-top: 6px; }
+.quote-body { flex: 1; min-width: 0; transition: opacity .22s ease, transform .22s ease; }
+.quote-body.fading { opacity: 0; transform: translateY(4px); }
+.quote-text { margin: 0; font-size: 1.05rem; font-weight: 550; letter-spacing: -.005em; line-height: 1.4; }
+.quote-author { margin: 4px 0 0; color: var(--muted); font-size: .85rem; }
+.quote-controls { display: flex; gap: 8px; align-items: center; flex: none; }
+.quote-controls .select { padding: 6px 10px; font-size: .82rem; }
+@media (max-width: 640px) {
+  .quote-wrap { padding: 0 12px; }
+  .quote-card { flex-wrap: wrap; padding: 12px 14px; }
+  .quote-mark { display: none; }
+  .quote-body { flex-basis: 100%; }
+  .quote-controls { width: 100%; justify-content: space-between; }
+}
+
+.vt-hour-label { white-space: nowrap; }

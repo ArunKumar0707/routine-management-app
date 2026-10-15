@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DayFlow — 24-Hour Routine Planner</title>
+<meta name="theme-color" content="#4f6bed">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -34,6 +38,28 @@
     <button class="btn primary" id="createBtn">+ Create Activity</button>
   </div>
 </header>
+
+<section class="quote-wrap" aria-label="Motivational quote">
+  <div class="quote-card">
+    <div class="quote-mark" aria-hidden="true">“</div>
+    <div class="quote-body" id="quoteBody" aria-live="polite">
+      <p class="quote-text" id="quoteText"></p>
+      <p class="quote-author" id="quoteAuthor"></p>
+    </div>
+    <div class="quote-controls">
+      <label class="sr-only" for="quoteEvery">Change quote every</label>
+      <select id="quoteEvery" class="select" title="How often the quote changes">
+        <option value="1">Every minute</option>
+        <option value="5">Every 5 min</option>
+        <option value="15">Every 15 min</option>
+        <option value="30">Every 30 min</option>
+        <option value="60">Every hour</option>
+        <option value="1440">Every day</option>
+      </select>
+      <button class="btn icon-btn" id="quoteNext" type="button" title="Show another quote" aria-label="Show another quote">↻</button>
+    </div>
+  </div>
+</section>
 
 <main class="layout">
   <section class="card timeline-card">
@@ -71,6 +97,7 @@
       <label class="switch-row"><input type="checkbox" id="alertEnabled"> Alert when an activity starts</label>
       <label class="switch-row"><input type="checkbox" id="alertSound"> Play a tone</label>
       <label class="switch-row"><input type="checkbox" id="alertNotify"> Show a notification</label>
+      <label class="switch-row" id="alertAwakeRow"><input type="checkbox" id="alertAwake"> Keep screen on while open (recommended on phones)</label>
       <div class="alert-grid">
         <label class="field">Tone
           <select id="alertTone" class="select">
@@ -229,6 +256,7 @@
 
 <script src="app.js"></script>
 <script src="sounds/sounds.js"></script>
+<script src="quotes.js"></script>
 <script src="alerts.js"></script>
 </body>
 </html>
